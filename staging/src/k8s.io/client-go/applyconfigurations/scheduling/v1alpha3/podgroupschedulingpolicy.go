@@ -29,10 +29,10 @@ import (
 // Exactly one policy must be set.
 type PodGroupSchedulingPolicyApplyConfiguration struct {
 	// Basic specifies that the pods in this group should be scheduled using
-	// standard Kubernetes scheduling behavior.
+	// standard Kubernetes scheduling behavior. This field is immutable.
 	Basic *schedulingv1alpha3.BasicSchedulingPolicy `json:"basic,omitempty"`
 	// Gang specifies that the pods in this group should be scheduled using
-	// all-or-nothing semantics.
+	// all-or-nothing semantics. This field cannot be set/unset during update.
 	Gang *GangSchedulingPolicyApplyConfiguration `json:"gang,omitempty"`
 }
 

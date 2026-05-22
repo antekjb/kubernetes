@@ -127,6 +127,8 @@ type Step struct {
 	CreateNodes []*v1.Node
 	// CreatePodGroup is use to create a pod group and wait for it to be ready.
 	CreatePodGroup *schedulingapi.PodGroup
+	// UpdatePodGroup is used to update an existing pod group and wait for it to propagate.
+	UpdatePodGroup *schedulingapi.PodGroup
 	// CreatePods is use to create pods in the cluster.
 	CreatePods []*v1.Pod
 	// CreateWorkloads is use to create workloads in the cluster.
@@ -241,6 +243,39 @@ func createPodGroup(testCtx *testutils.TestContext, ns string, pg *schedulingapi
 	)
 	if err != nil {
 		return fmt.Errorf("failed to wait for pod group %s to be discoverable by scheduler: %w", pgCopy.Name, err)
+	}
+	return nil
+}
+
+func updatePodGroup(testCtx *testutils.TestContext, ns string, pg *schedulingapi.PodGroup) error {
+	cs := testCtx.ClientSet
+	pgCopy := pg.DeepCopy()
+	pgCopy.Namespace = ns
+
+	existing, err := cs.SchedulingV1alpha3().PodGroups(ns).Get(testCtx.Ctx, pgCopy.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get existing pod group %s for update: %w", pgCopy.Name, err)
+	}
+	pgCopy.ResourceVersion = existing.ResourceVersion
+
+	if _, err := cs.SchedulingV1alpha3().PodGroups(ns).Update(testCtx.Ctx, pgCopy, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("failed to update pod group %s: %w", pgCopy.Name, err)
+	}
+	err = wait.PollUntilContextTimeout(testCtx.Ctx, 100*time.Millisecond, wait.ForeverTestTimeout, false,
+		func(_ context.Context) (bool, error) {
+			listerPG, err := testCtx.InformerFactory.Scheduling().V1alpha3().PodGroups().Lister().PodGroups(ns).Get(pgCopy.Name)
+			if err != nil {
+				return false, err
+			}
+			if listerPG.Spec.SchedulingPolicy.Gang != nil && pgCopy.Spec.SchedulingPolicy.Gang != nil &&
+				listerPG.Spec.SchedulingPolicy.Gang.MinCount == pgCopy.Spec.SchedulingPolicy.Gang.MinCount {
+				return true, nil
+			}
+			return false, nil
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to wait for pod group %s update to be discoverable by scheduler: %w", pgCopy.Name, err)
 	}
 	return nil
 }
@@ -455,6 +490,8 @@ func RunSteps(testCtx *testutils.TestContext, t *testing.T, ns string, steps []S
 			err = createPods(testCtx, ns, step.CreatePods)
 		case step.CreatePodGroup != nil:
 			err = createPodGroup(testCtx, ns, step.CreatePodGroup)
+		case step.UpdatePodGroup != nil:
+			err = updatePodGroup(testCtx, ns, step.UpdatePodGroup)
 		case step.CreateWorkloads != nil:
 			err = createWorkloads(testCtx, ns, step.CreateWorkloads)
 		case step.DeletePods != nil:
