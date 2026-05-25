@@ -19,6 +19,7 @@ package preemption
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,26 +28,32 @@ import (
 	schedulingapi "k8s.io/api/scheduling/v1alpha3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	configv1 "k8s.io/kube-scheduler/config/v1"
+	fwk "k8s.io/kube-scheduler/framework"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/scheduler"
+	configtesting "k8s.io/kubernetes/pkg/scheduler/apis/config/testing"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/defaultbinder"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
+	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
 	testutils "k8s.io/kubernetes/test/integration/util"
+	"k8s.io/utils/ptr"
 )
 
 // TestPodGroupPreemption tests preemption scenarios involving pod groups.
 func TestPodGroupPreemption(t *testing.T) {
 	featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
-		features.GenericWorkload:                       true,
-		features.GangScheduling:                        true,
-		features.WorkloadAwarePreemption:               true,
-		features.ClearingNominatedNodeNameAfterBinding: false,
+		features.GenericWorkload:         true,
+		features.GangScheduling:          true,
+		features.WorkloadAwarePreemption: true,
 	})
-
 	tests := []struct {
 		name                       string
 		nodes                      []*v1.Node
@@ -730,7 +737,46 @@ func TestPodGroupPreemption(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			registry := make(frameworkruntime.Registry)
+
+			// Register mock bind plugin that will register NNN information during binding.
+			mockBindPluginName := "mockBindPlugin"
+			var bindPlugin = mockBindPlugin{
+				name:       mockBindPluginName,
+				realPlugin: nil,
+				nnnInfo:    sync.Map{},
+			}
+			err := registry.Register(mockBindPluginName, func(ctx context.Context, o runtime.Object, fh fwk.Handle) (fwk.Plugin, error) {
+				db, err := defaultbinder.New(ctx, o, fh)
+				if err != nil {
+					t.Fatalf("Error creating a default binder plugin: %v", err)
+				}
+				bindPlugin.realPlugin = db.(fwk.BindPlugin)
+				return &bindPlugin, nil
+			})
+			if err != nil {
+				t.Fatalf("Error registering a bind plugin: %v", err)
+			}
+
+			cfg := configtesting.V1ToInternalWithDefaults(t, configv1.KubeSchedulerConfiguration{
+				Profiles: []configv1.KubeSchedulerProfile{{
+					SchedulerName: ptr.To(v1.DefaultSchedulerName),
+					Plugins: &configv1.Plugins{
+						MultiPoint: configv1.PluginSet{
+							Enabled: []configv1.Plugin{
+								{Name: mockBindPluginName},
+							},
+							Disabled: []configv1.Plugin{
+								{Name: names.DefaultBinder},
+							},
+						},
+					},
+				}},
+			})
+
 			testCtx := testutils.InitTestSchedulerWithNS(t, "podgroup-preemption",
+				scheduler.WithProfiles(cfg.Profiles...),
+				scheduler.WithFrameworkOutOfTreeRegistry(registry),
 				scheduler.WithPodMaxBackoffSeconds(0),
 				scheduler.WithPodInitialBackoffSeconds(0))
 			cs, ns := testCtx.ClientSet, testCtx.NS.Name
@@ -807,15 +853,15 @@ func TestPodGroupPreemption(t *testing.T) {
 				}
 			}
 
-			// 6. Verify unschedulable pods
+			// 5. Verify unschedulable pods
 			for _, podName := range tt.expectedUnschedulable {
 				if err := wait.PollUntilContextTimeout(testCtx.Ctx, 100*time.Millisecond, 10*time.Second, false,
 					testutils.PodUnschedulable(cs, ns, podName)); err != nil {
-					t.Errorf("Pod %s was expected to be unschedulableso  but wasn't: %v", podName, err)
+					t.Errorf("Pod %s was expected to be unschedulable but wasn't: %v", podName, err)
 				}
 			}
 
-			// 7. Verify scheduled pods
+			// 6. Verify scheduled pods
 			for _, podName := range tt.expectedScheduled {
 				if err := wait.PollUntilContextTimeout(testCtx.Ctx, 100*time.Millisecond, 10*time.Second, false,
 					testutils.PodScheduled(cs, ns, podName)); err != nil {
@@ -823,7 +869,7 @@ func TestPodGroupPreemption(t *testing.T) {
 				}
 			}
 
-			// 8. Verify preempted pods
+			// 7. Verify preempted pods
 			for _, podName := range tt.expectedPreempted {
 				if err := wait.PollUntilContextTimeout(testCtx.Ctx, 200*time.Millisecond, 5*time.Second, false,
 					func(ctx context.Context) (bool, error) {
@@ -841,17 +887,32 @@ func TestPodGroupPreemption(t *testing.T) {
 				}
 			}
 
-			// 9. Verify preemptor pods have nominated node name
+			// 8. Verify preemptor pods have nominated node name
 			for _, podName := range tt.expectedToHaveNNNInfo {
-				pod, err := cs.CoreV1().Pods(ns).Get(testCtx.Ctx, podName, metav1.GetOptions{})
-				if err != nil {
-					t.Errorf("Error getting pod %s: %v", podName, err)
-					continue
-				}
-				if err := testutils.WaitForNominatedNodeName(testCtx.Ctx, cs, pod); err != nil {
-					t.Errorf("Error waiting for nominated node name for pod %s: %v", podName, err)
+				if node, ok := bindPlugin.nnnInfo.Load(podName); !ok || node.(string) == "" {
+					t.Errorf("Pod %s was expected to have nominated node name but didn't", podName)
 				}
 			}
 		})
 	}
 }
+
+// mockBindPlugin is a fake plugin that registers NNN information during binding.
+type mockBindPlugin struct {
+	name       string
+	realPlugin fwk.BindPlugin
+	nnnInfo    sync.Map
+}
+
+func (bp *mockBindPlugin) Name() string {
+	return bp.name
+}
+
+func (bp *mockBindPlugin) Bind(ctx context.Context, state fwk.CycleState, p *v1.Pod, nodeName string) *fwk.Status {
+	if p.Status.NominatedNodeName != "" {
+		bp.nnnInfo.Store(p.Name, p.Status.NominatedNodeName)
+	}
+	return bp.realPlugin.Bind(ctx, state, p, nodeName)
+}
+
+var _ fwk.BindPlugin = &mockBindPlugin{}
