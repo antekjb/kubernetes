@@ -1338,5 +1338,10 @@ func updatePod(ctx context.Context, client clientset.Interface, apiCacher fwk.AP
 	// Resource version is included here to prevent an update during binding
 	// setting the PodScheduled=False condition from overwriting a
 	// PodScheduled=True update if a subsequent retry succeeds first.
-	return util.PatchPodStatus(ctx, client, pod.Name, pod.Namespace, pod.ResourceVersion, &pod.Status, podStatusCopy)
+	updatedPod, err := util.PatchPodStatus(ctx, client, pod.Name, pod.Namespace, pod.ResourceVersion, &pod.Status, podStatusCopy)
+	if err == nil && updatedPod != nil {
+		pod.ResourceVersion = updatedPod.ResourceVersion
+		pod.Status = updatedPod.Status
+	}
+	return err
 }

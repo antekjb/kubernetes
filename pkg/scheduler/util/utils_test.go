@@ -410,7 +410,7 @@ func TestPatchPodStatus(t *testing.T) {
 			if tc.nilOldStatus {
 				oldStatus = nil
 			}
-			err = PatchPodStatus(ctx, client, tc.pod.Name, tc.pod.Namespace, tc.resourceVersion, oldStatus, &tc.statusToUpdate)
+			_, err = PatchPodStatus(ctx, client, tc.pod.Name, tc.pod.Namespace, tc.resourceVersion, oldStatus, &tc.statusToUpdate)
 			if err != nil && tc.validateErr == nil {
 				// shouldn't be error
 				t.Fatal(err)

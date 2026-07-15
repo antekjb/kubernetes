@@ -2249,10 +2249,11 @@ func TestCoSchedulingWithPermitPlugin(t *testing.T) {
 				if err = testutils.WaitForPodUnschedulable(testCtx.Ctx, testCtx.ClientSet, podB); err != nil {
 					t.Errorf("Didn't expect the second pod to be scheduled. error: %v", err)
 				}
-				if !((permitPlugin.waitingPod == podA.Name && permitPlugin.rejectingPod == podB.Name) ||
-					(permitPlugin.waitingPod == podB.Name && permitPlugin.rejectingPod == podA.Name)) {
+				pp := permitPlugin.deepCopy()
+				if !((pp.waitingPod == podA.Name && pp.rejectingPod == podB.Name) ||
+					(pp.waitingPod == podB.Name && pp.rejectingPod == podA.Name)) {
 					t.Errorf("Expect one pod to wait and another pod to reject instead %s waited and %s rejected.",
-						permitPlugin.waitingPod, permitPlugin.rejectingPod)
+						pp.waitingPod, pp.rejectingPod)
 				}
 			} else {
 				if err = testutils.WaitForPodToSchedule(testCtx.Ctx, testCtx.ClientSet, podA); err != nil {
@@ -2261,10 +2262,11 @@ func TestCoSchedulingWithPermitPlugin(t *testing.T) {
 				if err = testutils.WaitForPodToSchedule(testCtx.Ctx, testCtx.ClientSet, podB); err != nil {
 					t.Errorf("Expected the second pod to be scheduled. error: %v", err)
 				}
-				if !((permitPlugin.waitingPod == podA.Name && permitPlugin.allowingPod == podB.Name) ||
-					(permitPlugin.waitingPod == podB.Name && permitPlugin.allowingPod == podA.Name)) {
+				pp := permitPlugin.deepCopy()
+				if !((pp.waitingPod == podA.Name && pp.allowingPod == podB.Name) ||
+					(pp.waitingPod == podB.Name && pp.allowingPod == podA.Name)) {
 					t.Errorf("Expect one pod to wait and another pod to allow instead %s waited and %s allowed.",
-						permitPlugin.waitingPod, permitPlugin.allowingPod)
+						pp.waitingPod, pp.allowingPod)
 				}
 			}
 

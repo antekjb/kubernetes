@@ -119,9 +119,9 @@ func BindPod(ctx context.Context, cs kubernetes.Interface, binding *v1.Binding) 
 // and then submit a request to API server to patch the pod changes. When
 // resourceVersion is not empty, it is included in the patch to detect
 // conflicts.
-func PatchPodStatus(ctx context.Context, cs kubernetes.Interface, name string, namespace string, resourceVersion string, oldStatus *v1.PodStatus, newStatus *v1.PodStatus) error {
+func PatchPodStatus(ctx context.Context, cs kubernetes.Interface, name string, namespace string, resourceVersion string, oldStatus *v1.PodStatus, newStatus *v1.PodStatus) (*v1.Pod, error) {
 	if newStatus == nil {
-		return nil
+		return nil, nil
 	}
 
 	if oldStatus == nil {
@@ -130,7 +130,7 @@ func PatchPodStatus(ctx context.Context, cs kubernetes.Interface, name string, n
 
 	oldData, err := json.Marshal(v1.Pod{Status: *oldStatus})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	newPod := v1.Pod{Status: *newStatus}
@@ -139,19 +139,21 @@ func PatchPodStatus(ctx context.Context, cs kubernetes.Interface, name string, n
 	}
 	newData, err := json.Marshal(newPod)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, &v1.Pod{})
 	if err != nil {
-		return fmt.Errorf("failed to create merge patch for pod %q/%q: %w", namespace, name, err)
+		return nil, fmt.Errorf("failed to create merge patch for pod %q/%q: %w", namespace, name, err)
 	}
 
 	if "{}" == string(patchBytes) {
-		return nil
+		return nil, nil
 	}
 
+	var updatedPod *v1.Pod
 	patchFn := func() error {
-		_, err := cs.CoreV1().Pods(namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}, "status")
+		var err error
+		updatedPod, err = cs.CoreV1().Pods(namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}, "status")
 		return err
 	}
 
@@ -162,7 +164,8 @@ func PatchPodStatus(ctx context.Context, cs kubernetes.Interface, name string, n
 		// Return faster in that case so the caller can generate a different patch.
 		retryFn = Retriable
 	}
-	return retry.OnError(retry.DefaultBackoff, retryFn, patchFn)
+	err = retry.OnError(retry.DefaultBackoff, retryFn, patchFn)
+	return updatedPod, err
 }
 
 // PatchPodGroupStatus calculates the delta bytes change from <old.Status> to <newStatus>,
